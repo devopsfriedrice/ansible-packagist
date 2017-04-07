@@ -1,0 +1,184 @@
+---
+
+- name: Install Repositories
+  yum: pkg={{ item }} state=installed
+  with_items:
+    - http://repo.mysql.com/mysql-community-release-el7-5.noarch.rpm
+    - https://mirror.webtatic.com/yum/el7/webtatic-release.rpm
+    - epel-release
+
+- name: Install yum plugin replace
+  yum: pkg="yum-plugin-replace" state=installed
+
+- name: check if php71w-common installed 
+  command: rpm -qa | grep php71w-common
+  register: php71w_common_check
+
+- name: Replace php-common with 71-common
+  shell: "yum replace -y php-common --replace-with=php71w-common"
+  become: true
+  when: php71w_common_check == 1
+
+- name: Install Required Packages
+  yum: pkg={{ item }} state=installed
+  with_items:
+    - nginx
+    - redis
+    - mysql-server
+    - java
+    - git
+    - php71w-fpm
+    - wget
+    - php71w-cli
+    - php71w-mysql
+    - php71w-xml
+    - mariadb-devel
+    - python-devel
+    - python-pip
+    - supervisor
+
+- name: install the 'Development tools' package group
+  yum:
+    name: "@Development tools"
+    state: present
+
+- name: Install mysql-python
+  pip: name=mysql-python
+
+- name: Install composer
+  shell: 'curl -sS https://getcomposer.org/installer | php'
+  become: true
+
+- name: Move composer
+  shell: 'mv composer.phar /usr/bin/composer'
+  become: true
+
+- stat: path=/opt/apache-solr-3.6.2.tgz
+  register: solr_downloaded
+
+- name: download apache-solr-3.6.2.tgz
+  get_url:
+    url: http://archive.apache.org/dist/lucene/solr/3.6.2/apache-solr-3.6.2.tgz
+    dest: /opt/apache-solr-3.6.2.tgz
+  when: solr_downloaded.stat.exists == False  
+
+- name: extract solr 
+  shell: "tar -xvf apache-solr-3.6.2.tgz"
+  args:
+    chdir: /opt
+
+- name: cp solar to /opt
+  shell: cp -R apache-solr-3.6.2/example /opt/solr
+  args:
+    chdir: /opt
+
+- name: get jetty
+  shell: "wget -O /etc/default/jetty https://gist.githubusercontent.com/koesie10/93cd2f2ab68471c34a25/raw/jetty"
+  become: true
+  args:
+    chdir: /opt/solr
+
+- name: get jetty logging config
+  shell: "wget -O /opt/solr/etc/jetty-logging.xml
+https://gist.githubusercontent.com/koesie10/1070b285b45fb9de652c/raw/6adbb2d54455de4a0adce44015a294b77795d298/jetty-logging.xml"
+  become: true
+  args:
+    chdir: /opt/solr
+
+- name: add schema.xml
+  copy: src=schema.xml dest=/opt/solr/solr/conf/schema.xml
+
+- name: add data-import config
+  copy: src=data-import.xml dest=/opt/solr/solr/conf/data-import.xml
+
+- name: add solrconfig
+  copy: src=solrconfig.xml dest=/opt/solr/solr/conf/solrconfig.xml
+
+- name: copy solr dist
+  shell: cp -r /opt/apache-solr-3.6.2/dist /opt/solr/solr/dist
+
+- name: copy solr dist to lib
+  shell: cp -r /opt/apache-solr-3.6.2/dist /opt/solr/solr/lib
+
+- name: add mysql connector
+  copy: src=mysql-connector-java-5.1.32-bin.jar dest=/opt/solr/solr/lib/mysql-connector-java-5.1.32-bin.jar
+
+- name: copy solr contrib
+  shell: cp -r /opt/apache-solr-3.6.2/contrib /opt/solr/solr/contrib
+
+- user:
+    name: solr
+    home: /opt/solr
+    shell: /sbin/false
+
+- name: "change solr dir permissions"
+  shell: "chown solr:solr -R /opt/solr"
+  become: true              
+
+- name: Create web directory
+  file: path=/etc/some_directory state=directory mode=0755
+
+- git:
+    repo: 'https://github.com/composer/packagist.git'
+    dest: /srv/packagist
+
+- name: deploy parameters.yml
+  copy: src="parameters.yml" dest=/srv/packagist/app/config/parameters.yml
+
+- name: deploy sueprvisor config
+  copy: src="supervisord.conf" dest=/etc/supervisord.conf
+
+- name: Basic NGINX config for packagist
+  copy: src="nginx.conf" dest=/etc/nginx/nginx.conf  
+
+- name: Basic php-fpm config for packagist
+  copy: src="www.conf" dest=/etc/php-fpm.d/www.conf
+
+- name: Run composer in packagist directory
+  shell: "composer install -o -n"
+  args:
+    chdir: /srv/packagist
+
+- name: Disable selinux
+  shell: "setenforce 0"
+  become: true
+
+- name: Create a new database with name 'packagist'
+  mysql_db:
+    name: packagist
+    state: present
+
+- name: Create packagist schema
+  shell: "app/console doctrine:schema:create"
+  become: true
+  args:
+    chdir: /srv/packagist
+    creates: db_setup.txt 
+  run_once: true
+
+- name: Clear Production Packagist Cache    
+  shell: "app/console cache:clear --env=prod"
+  become: true
+  args:
+    chdir: /srv/packagist    
+
+- name: Install web assets
+  shell: app/console assets:install web
+  become: true 
+  args:
+    chdir: /srv/packagist      
+
+- name: Set packagist dir permissions
+  shell: chown -R apache:apache /srv/packagist/
+  become: true    
+
+- name: Start Services
+  service: name={{ item }} state=started enabled=yes
+  become: true
+  with_items:
+    - mysql
+    - redis
+    - php-fpm
+    - nginx
+    - supervisord
+
